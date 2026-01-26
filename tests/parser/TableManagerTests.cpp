@@ -2302,6 +2302,37 @@ VFPPROD\n\
     BOOST_CHECK_CLOSE(vfpprodTable(1, 0, 0, 0, 2), 450.0 * table_scaling_factor, 0.001);
 }
 
+/**
+ * Tests that partial sparse tables (more than 1 but not all records) still fail.
+ * Only single-line tables should be supported with constant delta pressure.
+ */
+BOOST_AUTO_TEST_CASE(VFPProdTable_partial_sparse_should_fail_Test) {
+    // Partial table: Needs 4 lines (2 THP × 2 ALQ), provides only 2 lines
+    const char *missing_values = "\
+VFPPROD\n\
+ 1 1000 'GAS' 'WGR' 'GOR' /\n\
+   1000.0  /\n\
+   100.0   200.0   /\n\
+   0.0     /\n\
+   0.0     /\n\
+   0.0     50000.0  /\n\
+-- Only 2 of 4 required lines\n\
+   1 1 1 1   150.0   /\n\
+   2 1 1 1   250.0   /\n\
+/\n";
+
+    Opm::Parser parser;
+    auto deck = parser.parseString(missing_values, Opm::ParseContext());
+    const auto& vfpprodKeyword = deck.getKeyword("VFPPROD");
+    auto units = Opm::UnitSystem::newMETRIC();
+
+    Opm::VFPProdTable vfpprodTable;
+
+    // Should fail because partial sparse tables are not supported
+    // Only single-line tables get special constant delta pressure handling
+    BOOST_CHECK_THROW(vfpprodTable.init(vfpprodKeyword, units), std::invalid_argument);
+}
+
 
 BOOST_AUTO_TEST_CASE( TestPLYMWINJ ) {
     const char *inputstring =
