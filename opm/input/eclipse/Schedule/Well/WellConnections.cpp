@@ -1263,6 +1263,7 @@ CF and Kh items for well {} must both be specified or both defaulted/negative)",
         // per connection, in order).
         const bool synthetic1to1 = this->m_synthetic_trajectory
             && (this->m_traj_perfs.size() == original_connections.size());
+        bool wellHasRefined = false;   // any replayed connection lands in an LGR
 
         for (std::size_t perfIdx = 0; perfIdx < this->m_traj_perfs.size(); ++perfIdx) {
             const auto& rec = this->m_traj_perfs[perfIdx];
@@ -1374,6 +1375,7 @@ CF and Kh items for well {} must both be specified or both defaulted/negative)",
 
                 if (info->lgr_grid != 0 || ! info->lgr_name.empty()) {
                     perfRefined = true;
+                    wellHasRefined = true;
                 }
                 else if (info->ijk == origIJK) {
                     perfCoarseAtOrig = true;
@@ -1410,6 +1412,18 @@ CF and Kh items for well {} must both be specified or both defaulted/negative)",
                         perfIdx, origIJK[0], origIJK[1], origIJK[2]));
                 }
             }
+        }
+
+        // A synthetic trajectory none of whose completions landed in an LGR is
+        // untouched by the refinement: the replay only exists to discover child
+        // cells where a parent was refined. Restore the ORIGINAL connection set
+        // verbatim -- the replay otherwise renumbers complnum / sort_value and
+        // nudges the recomputed CF (review 2026-09-10, PRODU10: after the middle
+        // completion was recovered, the trailing one still had complnum 3->2
+        // because the replay had numbered it as the 2nd, not 3rd, connection).
+        if (synthetic1to1 && ! wellHasRefined) {
+            this->m_connections = original_connections;
+            return {};
         }
 
         // Re-add the original connections of a synthetic trajectory that the

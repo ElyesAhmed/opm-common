@@ -930,14 +930,13 @@ BOOST_AUTO_TEST_CASE(RecomputeTrajectory_SyntheticIdentityKeepsAllCompletions)
         for (std::size_t c = 0; c < 3; ++c) {
             BOOST_CHECK_EQUAL(wc[c].getI(), 1);
             BOOST_CHECK_EQUAL(wc[c].getJ(), 1);
-            BOOST_CHECK_EQUAL(wc[c].getK(), static_cast<int>(c));   // K order preserved
+            BOOST_CHECK_EQUAL(wc[c].getK(), static_cast<int>(c));      // K order preserved
             BOOST_CHECK_EQUAL(wc[c].get_lgr_level(), 0);
+            BOOST_CHECK_EQUAL(wc[c].complnum(), baseline[c].complnum()); // no renumbering
             BOOST_CHECK(wc[c].CF() > 0.0);
-        }
-        // A restored (fallback) completion keeps the ORIGINAL connection
-        // factor verbatim; a replay-recomputed one is close to it.
-        if (flattenMiddle) {
-            BOOST_CHECK_CLOSE(wc[1].CF(), cf0[1], 1.0e-9);
+            // A synthetic well untouched by refinement is restored verbatim:
+            // the connection factor is bit-for-bit the original.
+            BOOST_CHECK_CLOSE(wc[c].CF(), cf0[c], 1.0e-12);
         }
     };
 
