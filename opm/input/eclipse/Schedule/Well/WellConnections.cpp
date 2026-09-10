@@ -60,8 +60,10 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <numbers>
 #include <optional>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -963,36 +965,25 @@ CF and Kh items for well {} must both be specified or both defaulted/negative)",
             return false;
         }
 
-        // Extend each in-cell segment slightly beyond the cell faces: the
-        // intersection extractor only records cells through enter/leave face
-        // crossings, so a segment fully interior to one cell would yield no
-        // intersection at all. The sliver spilling into the face neighbours
-        // is removed by the replay's minimum-length filter.
-        constexpr double extend = 1.0 + 1.0e-6;
+        // Build the polyline as the sequence of completion-cell CENTRES,
+        // bracketed by one lead-in and one lead-out point along the first /
+        // last connection's direction. Every interior vertex is a cell centre,
+        // hence strictly inside its cell, so the intersection replay always
+        // finds a clean enter/leave face crossing for that cell. (The earlier
+        // per-cell entry/exit-point construction placed vertices ON the cell
+        // faces; for a contiguous vertical completion the interior points then
+        // collapsed onto the shared face and the replay found no intersection
+        // at all for the middle cell -- PRODU10 lost its K=3 completion.)
 
-        double total_md = 0.0;
-        auto appendPoint = [this, &total_md](const std::array<double,3>& p) {
-            if (! this->md.empty()) {
-                const auto seg = std::hypot(p[0] - this->coord[0].back(),
-                                            p[1] - this->coord[1].back(),
-                                            p[2] - this->coord[2].back());
-                if (! (seg > 0.0)) {
-                    return;     // coincident with the previous point
-                }
-                total_md += seg;
-            }
-            for (std::size_t d = 0; d < 3; ++d) {
-                this->coord[d].push_back(p[d]);
-            }
-            this->md.push_back(total_md);
-        };
-
+        struct CellGeom { std::array<double,3> centre, dims; int axis; };
+        std::vector<CellGeom> cg;
+        cg.reserve(this->m_connections.size());
         for (const auto& conn : this->m_connections) {
-            auto centre = cellCenter(conn.global_index());
-            const auto dims = cellDims(conn.global_index());
-
-            const int axis = (conn.dir() == Connection::Direction::X) ? 0
-                : (conn.dir() == Connection::Direction::Y) ? 1 : 2;
+            CellGeom g;
+            g.centre = cellCenter(conn.global_index());
+            g.dims   = cellDims(conn.global_index());
+            g.axis   = (conn.dir() == Connection::Direction::X) ? 0
+                     : (conn.dir() == Connection::Direction::Y) ? 1 : 2;
 
             // Nudge the polyline slightly off the exact cell centre in the
             // lateral directions: with an even refinement factor the centre
@@ -1001,20 +992,71 @@ CF and Kh items for well {} must both be specified or both defaulted/negative)",
             // cell but strictly inside one child column, and does not affect
             // the Peaceman CTF (only in-cell lengths enter, not position).
             for (int d = 0; d < 3; ++d) {
-                if (d != axis) {
-                    centre[d] += 1.0e-3 * dims[d];
+                if (d != g.axis) {
+                    g.centre[d] += 1.0e-3 * g.dims[d];
                 }
             }
+            cg.push_back(g);
+        }
 
-            auto entry = centre;
-            auto exit = centre;
-            entry[axis] -= 0.5 * dims[axis] * extend;
-            exit[axis] += 0.5 * dims[axis] * extend;
+        double total_md = 0.0;
+        auto appendPoint = [this, &total_md](const std::array<double,3>& p) -> bool {
+            if (! this->md.empty()) {
+                const auto seg = std::hypot(p[0] - this->coord[0].back(),
+                                            p[1] - this->coord[1].back(),
+                                            p[2] - this->coord[2].back());
+                if (! (seg > 0.0)) {
+                    return false;   // coincident with the previous point
+                }
+                total_md += seg;
+            }
+            for (std::size_t d = 0; d < 3; ++d) {
+                this->coord[d].push_back(p[d]);
+            }
+            this->md.push_back(total_md);
+            return true;
+        };
 
-            appendPoint(entry);
-            const double perf_top = total_md;
-            appendPoint(exit);
-            const double perf_bot = total_md;
+        const auto unitDir = [](const std::array<double,3>& a,
+                                const std::array<double,3>& b) {
+            std::array<double,3> u { a[0]-b[0], a[1]-b[1], a[2]-b[2] };
+            const double n = std::hypot(u[0], u[1], u[2]);
+            if (n > 0.0) { for (auto& x : u) { x /= n; } }
+            return u;
+        };
+
+        // Lead-in / lead-out directions and lengths (a touch past the outer
+        // cell faces so the extractor sees the first / last cell entered/left).
+        std::array<double,3> dirIn{}, dirOut{};
+        if (cg.size() >= 2) {
+            dirIn  = unitDir(cg[1].centre, cg[0].centre);
+            dirOut = unitDir(cg.back().centre, cg[cg.size()-2].centre);
+        } else {
+            dirIn[cg[0].axis]  = 1.0;
+            dirOut[cg[0].axis] = 1.0;
+        }
+        const double leadIn  = 0.5 * cg.front().dims[cg.front().axis] * (1.0 + 1.0e-3);
+        const double leadOut = 0.5 * cg.back().dims[cg.back().axis]  * (1.0 + 1.0e-3);
+
+        std::array<double,3> pIn{}, pOut{};
+        for (int d = 0; d < 3; ++d) {
+            pIn[d]  = cg.front().centre[d] - dirIn[d]  * leadIn;
+            pOut[d] = cg.back().centre[d]  + dirOut[d] * leadOut;
+        }
+
+        appendPoint(pIn);
+        std::vector<double> centreMD(cg.size(), 0.0);
+        for (std::size_t i = 0; i < cg.size(); ++i) {
+            appendPoint(cg[i].centre);
+            centreMD[i] = total_md;   // == previous value if the point coincided
+        }
+        appendPoint(pOut);
+
+        for (std::size_t i = 0; i < cg.size(); ++i) {
+            const auto& conn = this->m_connections[i];
+            const double half = 0.5 * cg[i].dims[cg[i].axis];
+            const double perf_top = centreMD[i] - half;
+            const double perf_bot = centreMD[i] + half;
 
             if (! (perf_bot > perf_top)) {
                 continue;       // degenerate (zero-extent) cell
@@ -1047,6 +1089,31 @@ CF and Kh items for well {} must both be specified or both defaulted/negative)",
             for (auto& c : this->coord) { c.clear(); }
             this->md.clear();
             return false;
+        }
+
+        // Mark the trajectory as synthetic: unlike a WELTRAJ/COMPTRAJ path, it
+        // is a fiction derived from the COMPDAT cells, so those cells -- not the
+        // polyline -- are authoritative. recomputeTrajectoryConnections() uses
+        // this to restore a completion the intersection replay would otherwise
+        // drop as a grazing sliver (m_traj_perfs[i] <-> original m_connections[i]).
+        this->m_synthetic_trajectory = true;
+
+        if (std::getenv("OPM_DEBUG_TRAJ_RECOMPUTE") != nullptr) {
+            OpmLog::info(fmt::format(
+                "  [traj-synth] {} polyline points, {} perfs:",
+                this->coord[0].size(), this->m_traj_perfs.size()));
+            for (std::size_t i = 0; i < this->coord[0].size(); ++i) {
+                OpmLog::info(fmt::format(
+                    "      pt {:2d}  md {:.6f}  xyz ({:.4f},{:.4f},{:.4f})",
+                    i, this->md[i], this->coord[0][i], this->coord[1][i],
+                    this->coord[2][i]));
+            }
+            for (std::size_t p = 0; p < this->m_traj_perfs.size(); ++p) {
+                OpmLog::info(fmt::format(
+                    "      perf {:2d}  MD [{:.6f}, {:.6f}]",
+                    p, this->m_traj_perfs[p].perf_top,
+                    this->m_traj_perfs[p].perf_bot));
+            }
         }
 
         return true;
@@ -1153,12 +1220,12 @@ CF and Kh items for well {} must both be specified or both defaulted/negative)",
         }
     }
 
-    void WellConnections::recomputeTrajectoryConnections
+    std::set<std::string> WellConnections::recomputeTrajectoryConnections
         (const std::vector<std::array<std::array<double,3>, 8>>&          cellCorners,
          const std::function<std::optional<TrajectoryCell>(std::size_t)>& cellInfo)
     {
         if (!this->hasTrajectory() || this->m_traj_perfs.empty()) {
-            return;
+            return {};
         }
 
         // Convert the supplied (plain double) corner geometry to the cvf type
@@ -1173,38 +1240,64 @@ CF and Kh items for well {} must both be specified or both defaulted/negative)",
             cornersCvf.push_back(cc);
         }
 
-        // Rebuild the trajectory connections against the supplied grid.
+        // Rebuild the trajectory connections against the supplied grid. Keep
+        // the originals to recover a completion the replay clips away.
+        const std::vector<Connection> original_connections = this->m_connections;
+        // Original completions of a SYNTHETIC trajectory that the replay failed
+        // to reproduce on the coarse grid (see the per-perforation check
+        // below): restored verbatim afterwards.
+        std::vector<const Connection*> droppedOriginals;
         this->m_connections.clear();
+
+        // LGR names of the FINAL retained connections (NOT of every queried
+        // cell -- a filtered sliver must not influence the well's grid tag,
+        // review 2026-09-10). Returned to the caller.
+        std::set<std::string> retainedLgrNames;
 
         external::cvf::ref<external::cvf::BoundingBoxTree> cellSearchTree;
 
-        for (const auto& rec : this->m_traj_perfs) {
-            // Reconstruct the well path geometry for this perforation interval,
-            // exactly as loadCOMPTRAJ does.
+        const std::size_t nv = this->md.size();
+
+        // A synthetic trajectory keeps a 1:1 perforation <-> original
+        // connection correspondence (synthesizeTrajectory emits one TrajPerf
+        // per connection, in order).
+        const bool synthetic1to1 = this->m_synthetic_trajectory
+            && (this->m_traj_perfs.size() == original_connections.size());
+
+        for (std::size_t perfIdx = 0; perfIdx < this->m_traj_perfs.size(); ++perfIdx) {
+            const auto& rec = this->m_traj_perfs[perfIdx];
+            // Assemble the well path geometry for this perforation. Take the
+            // stored polyline vertices that BRACKET [perf_top, perf_bot], one
+            // extra vertex beyond each end, so the segment handed to the
+            // intersection extractor starts and ends strictly inside a
+            // neighbouring cell. The extractor needs a clean face crossing at
+            // each end and returns nothing when both endpoints sit exactly on
+            // a cell face -- which is every interior perforation of a
+            // contiguous synthetic completion, whose per-cell entry/exit
+            // points collapse onto the shared face (review 2026-09-10, PRODU10
+            // lost its middle completion). Cells outside the perforation
+            // interval that this widening pulls in are dropped below by the
+            // measured-depth overlap test.
+            std::size_t lo = 0, hi = nv > 0 ? nv - 1 : 0;
+            for (std::size_t i = 0; i < nv; ++i) {
+                if (this->md[i] <= rec.perf_top) { lo = i; }
+                if (this->md[i] >= rec.perf_bot) { hi = i; break; }
+            }
+            if (lo > 0)      { --lo; }
+            if (hi + 1 < nv) { ++hi; }
+
             std::vector<external::cvf::Vec3d> points;
             std::vector<double>               measured_depths;
-
-            external::cvf::Vec3d p_top, p_bot;
-            for (std::size_t i = 0; i < 3; ++i) {
-                p_top[i] = linearInterpolation(this->md, this->coord[i], rec.perf_top);
-                p_bot[i] = linearInterpolation(this->md, this->coord[i], rec.perf_bot);
+            points.reserve(hi - lo + 1);
+            measured_depths.reserve(hi - lo + 1);
+            for (std::size_t i = lo; i <= hi; ++i) {
+                points.emplace_back(this->coord[0][i], this->coord[1][i],
+                                    this->coord[2][i]);
+                measured_depths.push_back(this->md[i]);
             }
-
-            points.reserve(this->coord[0].size() + 2);
-            measured_depths.reserve(this->coord[0].size() + 2);
-
-            points.push_back(p_top);
-            measured_depths.push_back(rec.perf_top);
-            for (std::size_t i = 0; i < this->coord[0].size(); ++i) {
-                if ((this->md[i] > rec.perf_top) && (this->md[i] < rec.perf_bot)) {
-                    points.push_back(external::cvf::Vec3d(this->coord[0][i],
-                                                          this->coord[1][i],
-                                                          this->coord[2][i]));
-                    measured_depths.push_back(this->md[i]);
-                }
+            if (points.size() < 2) {
+                continue;   // nothing to intersect
             }
-            points.push_back(p_bot);
-            measured_depths.push_back(rec.perf_bot);
 
             external::cvf::ref<external::RigWellPath> wellPathGeometry {
                 new external::RigWellPath
@@ -1219,27 +1312,141 @@ CF and Kh items for well {} must both be specified or both defaulted/negative)",
 
             const auto intersections = e.cellIntersectionInfosAlongWellPath();
 
+            const double perfSpan = rec.perf_bot - rec.perf_top;
+            const double sliver   = 1.0e-4 * perfSpan;
+
+            const bool traceRecompute =
+                std::getenv("OPM_DEBUG_TRAJ_RECOMPUTE") != nullptr;
+            if (traceRecompute) {
+                OpmLog::info(fmt::format(
+                    "  [traj-recompute] perf {} MD [{:.6f}, {:.6f}] span {:.6f}  "
+                    "sliver-threshold {:.3e}  polyline-vertices {} (md {:.4f}..{:.4f})  "
+                    "intersections {}",
+                    perfIdx, rec.perf_top, rec.perf_bot, perfSpan, sliver,
+                    points.size(), measured_depths.front(), measured_depths.back(),
+                    intersections.size()));
+            }
+
+            // The original completion cell this perforation stands for (only
+            // meaningful for a 1:1 synthetic trajectory).
+            const std::array<int,3> origIJK = synthetic1to1
+                ? std::array<int,3>{ original_connections[perfIdx].getI(),
+                                     original_connections[perfIdx].getJ(),
+                                     original_connections[perfIdx].getK() }
+                : std::array<int,3>{ -1, -1, -1 };
+            bool perfRefined      = false;   // produced a connection in an LGR
+            bool perfCoarseAtOrig = false;   // produced the coarse original cell
+
             for (const auto& is : intersections) {
                 const auto info = cellInfo(is.globCellIndex);
+
+                // Clip the intersection to this perforation's measured-depth
+                // interval: the widened polyline also traverses the cells just
+                // outside [perf_top, perf_bot], and those must not become
+                // connections of this perforation.
+                const double ovLo = std::max(is.startMD, rec.perf_top);
+                const double ovHi = std::min(is.endMD,   rec.perf_bot);
+                const double overlap = ovHi - ovLo;
+
+                if (traceRecompute) {
+                    OpmLog::info(fmt::format(
+                        "      cell glob {}  MD [{:.5f}, {:.5f}]  overlap {:.3e}  "
+                        "{}  ijk {}",
+                        is.globCellIndex, is.startMD, is.endMD, overlap,
+                        info.has_value() ? "active" : "INACTIVE/absent",
+                        info.has_value()
+                            ? fmt::format("({},{},{}) lgr_grid {}",
+                                          info->ijk[0], info->ijk[1], info->ijk[2],
+                                          info->lgr_grid)
+                            : std::string{"-"}));
+                }
                 if (! info.has_value()) {
                     continue;   // inactive / absent cell -> skip
                 }
 
-                // Skip slivers where the path merely grazes a cell (e.g. the
-                // deliberate 1e-6 overshoot of synthesized COMPDAT segments
-                // into the face neighbours): they would become spurious
-                // near-zero-CF connections.
-                if (! ((is.endMD - is.startMD) >
-                       1.0e-4 * (rec.perf_bot - rec.perf_top)))
-                {
+                // Outside this perforation's interval, or a grazing sliver
+                // (the deliberate overshoot of synthesized COMPDAT segments
+                // into the face neighbours): not a connection of this
+                // perforation.
+                if (! (overlap > sliver)) {
                     continue;
                 }
 
+                if (info->lgr_grid != 0 || ! info->lgr_name.empty()) {
+                    perfRefined = true;
+                }
+                else if (info->ijk == origIJK) {
+                    perfCoarseAtOrig = true;
+                }
+
+                if (! info->lgr_name.empty()) {
+                    retainedLgrNames.insert(info->lgr_name);
+                }
+
+                // Scale the in-cell segment vector to the part of the cell that
+                // actually lies within the perforation interval (== 1 for a
+                // real trajectory whose perf spans exactly its own vertices).
+                const double isLen = is.endMD - is.startMD;
+                const double f = (isLen > 0.0)
+                    ? std::clamp(overlap / isLen, 0.0, 1.0) : 1.0;
                 const auto& v = is.intersectionLengthsInCellCS;
-                this->addOrUpdateTrajectoryConnection(rec, *info,
-                                                      {v[0], v[1], v[2]});
+                this->addOrUpdateTrajectoryConnection(
+                    rec, *info, {v[0] * f, v[1] * f, v[2] * f});
+            }
+
+            // A synthetic perforation whose cell was NOT refined must yield
+            // exactly its original coarse completion. When the intersection
+            // replay produces neither a refined child nor the coarse cell
+            // itself, the synthetic polyline merely ran too close to a cell
+            // face for the extractor's triangle test (review 2026-09-10,
+            // PRODU10: the middle of three stacked completions vanished).
+            // Recover the original connection verbatim.
+            if (synthetic1to1 && ! perfRefined && ! perfCoarseAtOrig) {
+                droppedOriginals.push_back(&original_connections[perfIdx]);
+                if (traceRecompute) {
+                    OpmLog::info(fmt::format(
+                        "      -> perforation {} produced no connection; "
+                        "restoring original completion ({},{},{})",
+                        perfIdx, origIJK[0], origIJK[1], origIJK[2]));
+                }
             }
         }
+
+        // Re-add the original connections of a synthetic trajectory that the
+        // replay failed to reproduce on the coarse grid (verbatim, so
+        // CF/Kh/complnum/state/dir/segment/perf_range are preserved). A
+        // WELTRAJ/COMPTRAJ trajectory is authoritative and is left untouched.
+        bool restoredAny = false;
+        for (const Connection* oc : droppedOriginals) {
+            const bool present = std::ranges::any_of(
+                this->m_connections, [&](const Connection& c)
+                { return c.sameCoordinate(oc->getI(), oc->getJ(), oc->getK()); });
+            if (present) {
+                continue;                       // another perforation kept it
+            }
+            this->m_connections.push_back(*oc);
+            restoredAny = true;
+        }
+
+        // A restored connection is appended out of order; re-establish the
+        // original completion order for the cells that have an original
+        // counterpart (children with no exact (i,j,k) match sort stably last).
+        if (restoredAny) {
+            const auto origPos = [&](const Connection& c) -> std::size_t {
+                for (std::size_t p = 0; p < original_connections.size(); ++p) {
+                    const auto& o = original_connections[p];
+                    if (c.sameCoordinate(o.getI(), o.getJ(), o.getK())) {
+                        return p;
+                    }
+                }
+                return original_connections.size();
+            };
+            std::ranges::stable_sort(this->m_connections,
+                [&](const Connection& a, const Connection& b)
+                { return origPos(a) < origPos(b); });
+        }
+
+        return retainedLgrNames;
     }
 
     void WellConnections::loadWELTRAJ(const DeckRecord& record,
