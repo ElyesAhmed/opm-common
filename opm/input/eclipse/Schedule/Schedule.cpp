@@ -1367,22 +1367,16 @@ Defaulted grid coordinates is not allowed for COMPDAT as part of ACTIONX)"
                     continue;
                 }
 
-                // Recompute on a fresh copy of the connection set; collect the
-                // LGRs the intersected cells belong to so the well can be tagged.
+                // Recompute on a fresh copy of the connection set. The well's
+                // grid tag is derived strictly from the connections actually
+                // retained (the returned name set), NOT from every cell the
+                // intersection query touched: a candidate cell dropped as a
+                // sliver or recovered as a coarse fallback must not make a
+                // protected well look like an LGR well (review 2026-09-10).
                 auto conns = std::make_shared<WellConnections>(well.getConnections());
 
-                std::set<std::string> lgrNames;
-                conns->recomputeTrajectoryConnections(
-                    cellCorners,
-                    [&cellInfo, &lgrNames](std::size_t idx)
-                        -> std::optional<WellConnections::TrajectoryCell>
-                    {
-                        auto info = cellInfo(idx);
-                        if (info.has_value() && ! info->lgr_name.empty()) {
-                            lgrNames.insert(info->lgr_name);
-                        }
-                        return info;
-                    });
+                const std::set<std::string> lgrNames =
+                    conns->recomputeTrajectoryConnections(cellCorners, cellInfo);
 
                 // Nothing intersected against this grid (e.g. the well's cells
                 // are not present on this rank): keep the original connections.
