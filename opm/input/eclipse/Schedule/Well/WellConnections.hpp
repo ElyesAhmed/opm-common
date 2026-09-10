@@ -26,6 +26,7 @@
 #include <cstddef>
 #include <functional>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -165,7 +166,14 @@ namespace Opm {
         ///
         /// Does nothing if this well has no retained trajectory. Reuses the
         /// same CTF/Kh computation as loadCOMPTRAJ.
-        void recomputeTrajectoryConnections
+        ///
+        /// \return the set of LGR names owning the FINAL retained connections
+        ///         (empty for a well that stays entirely on the coarse grid).
+        ///         A candidate cell that is queried but then dropped -- an
+        ///         inactive cell or a sliver grazing contact -- does NOT
+        ///         appear here, so the caller can derive the well's grid tag
+        ///         from the connections it actually kept.
+        std::set<std::string> recomputeTrajectoryConnections
             (const std::vector<std::array<std::array<double,3>, 8>>&                 cellCorners,
              const std::function<std::optional<TrajectoryCell>(std::size_t)>&        cellInfo);
 
@@ -262,6 +270,7 @@ namespace Opm {
             serializer(this->coord);
             serializer(this->md);
             serializer(this->m_traj_perfs);
+            serializer(this->m_synthetic_trajectory);
         }
 
     private:
@@ -272,6 +281,13 @@ namespace Opm {
 
         std::array<std::vector<double>, 3> coord{};
         std::vector<double> md{};
+
+        /// True when the trajectory was produced by synthesizeTrajectory() from
+        /// the COMPDAT cells (not loaded from WELTRAJ/COMPTRAJ). Then the
+        /// original completion cells are authoritative and a grazing-sliver drop
+        /// in the intersection replay is recovered (see
+        /// recomputeTrajectoryConnections).
+        bool m_synthetic_trajectory{false};
 
         /// Per-COMPTRAJ-record parameters retained at parse time so the
         /// trajectory connections can be recomputed against a different (e.g.

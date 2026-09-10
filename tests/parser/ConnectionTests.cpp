@@ -54,7 +54,9 @@
 
 #include <array>
 #include <cstddef>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <ostream>
 #include <stdexcept>
 #include <string>
@@ -772,6 +774,175 @@ BOOST_AUTO_TEST_CASE(loadCOMPTRAJTESTSPE1_2) {
          BOOST_CHECK_CLOSE(connections[i].CF(), units.to_si(Opm::UnitSystem::measure::transmissibility, connection_factor[i]), 2e-2);
          BOOST_CHECK_EQUAL(connections[i].global_index(), global_index[i]);
     }
+}
+
+namespace {
+
+// Geometry callbacks for WellConnections::recomputeTrajectoryConnections()
+// built from an EclipseGrid, keyed by GLOBAL cell index (all coarse cells).
+struct GridReplayGeom {
+    std::vector<std::array<std::array<double,3>, 8>> corners;
+    const Opm::EclipseGrid* grid{};
+
+    explicit GridReplayGeom(const Opm::EclipseGrid& g)
+        : grid(&g)
+    {
+        const std::size_t n = g.getCartesianSize();
+        corners.resize(n);
+        for (std::size_t gi = 0; gi < n; ++gi) {
+            const auto ijk = g.getIJK(gi);
+            for (std::size_t l = 0; l < 8; ++l) {
+                corners[gi][l] = g.getCornerPos(static_cast<std::size_t>(ijk[0]),
+                                                static_cast<std::size_t>(ijk[1]),
+                                                static_cast<std::size_t>(ijk[2]), l);
+            }
+        }
+    }
+
+    // Collapse one cell's geometry to a near-zero-thickness sliver, so the
+    // trajectory replay grazes it and the sliver filter drops every candidate.
+    void flatten(std::size_t i, std::size_t j, std::size_t k)
+    {
+        const std::size_t gi = grid->getGlobalIndex(i, j, k);
+        double zc = 0.0;
+        for (const auto& c : corners[gi]) { zc += c[2]; }
+        zc /= 8.0;
+        for (std::size_t l = 0; l < 8; ++l) {
+            corners[gi][l][2] = zc + (l < 4 ? -5.0e-6 : 5.0e-6);
+        }
+    }
+
+    std::function<std::optional<Opm::WellConnections::TrajectoryCell>(std::size_t)>
+    cellInfo() const
+    {
+        const auto* g = grid;
+        return [g](std::size_t gi)
+            -> std::optional<Opm::WellConnections::TrajectoryCell>
+        {
+            if (gi >= g->getCartesianSize()) { return std::nullopt; }
+            const auto ijk = g->getIJK(gi);
+            Opm::WellConnections::TrajectoryCell tc;
+            tc.ijk = { static_cast<int>(ijk[0]),
+                       static_cast<int>(ijk[1]),
+                       static_cast<int>(ijk[2]) };
+            tc.global_index = gi;
+            tc.depth        = g->getCellDepth(gi);
+            tc.dimensions   = g->getCellDims(gi);
+            tc.perm         = { 100.0 * 9.869233e-16, 100.0 * 9.869233e-16,
+                                 10.0 * 9.869233e-16 };  // 100/10 mD in SI
+            tc.ntg          = 1.0;
+            tc.satnum       = 0;
+            tc.lgr_name.clear();
+            tc.lgr_grid     = 0;
+            return tc;
+        };
+    }
+
+    std::function<std::array<double,3>(std::size_t)> center() const
+    {
+        const auto* g = grid;
+        return [g](std::size_t gi) { return g->getCellCenter(gi); };
+    }
+    std::function<std::array<double,3>(std::size_t)> extent() const
+    {
+        const auto* g = grid;
+        return [g](std::size_t gi) { return g->getCellDims(gi); };
+    }
+};
+
+constexpr const char* STACKED_COMPLETION_DECK = R"(RUNSPEC
+START
+ 1 JAN 2026 /
+OIL
+WATER
+DIMENS
+ 3 3 3 /
+TABDIMS
+/
+GRID
+DXV
+ 3*100 /
+DYV
+ 3*100 /
+DZV
+ 3*10 /
+DEPTHZ
+ 16*2000 /
+EQUALS
+ PERMX 100 /
+ PERMY 100 /
+ PERMZ  10 /
+ PORO   0.3 /
+/
+PROPS
+DENSITY
+ 800 1000 1 /
+SOLUTION
+SCHEDULE
+WELSPECS
+ 'P' 'G' 2 2 2005.0 OIL /
+/
+COMPDAT
+ 'P' 2 2 1 3 OPEN 1 1* 0.3 /
+/
+TSTEP
+ 3*10 /
+END
+)";
+
+} // anonymous namespace
+
+// A synthetic (COMPDAT-derived) trajectory that is replayed against a grid
+// with NO refinement must reproduce every original completion -- the replay is
+// only a device to discover child cells where a parent was refined, and must
+// never silently drop a completion (regression: SPE9 PRODU10 lost the middle
+// of its three stacked completions to the intersection extractor whenever
+// --adaptive-lgr / a dynamic rebuild triggered the trajectory replay, even
+// for a refinement box far away from the well).
+BOOST_AUTO_TEST_CASE(RecomputeTrajectory_SyntheticIdentityKeepsAllCompletions)
+{
+    const auto deck = Opm::Parser{}.parseString(STACKED_COMPLETION_DECK);
+    const auto es   = Opm::EclipseState { deck };
+    auto sched = Opm::Schedule { deck, es, std::make_shared<Opm::Python>() };
+    const auto& eg = es.getInputGrid();
+
+    const auto baseline = sched.getWell("P", 0).getConnections();
+    BOOST_REQUIRE_EQUAL(baseline.size(), 3u);
+    const auto cf0 = std::array { baseline[0].CF(), baseline[1].CF(), baseline[2].CF() };
+
+    GridReplayGeom geom(eg);
+
+    auto run = [&](bool flattenMiddle) {
+        auto wc = baseline;   // fresh copy
+        BOOST_REQUIRE(wc.synthesizeTrajectory(geom.center(), geom.extent()));
+        BOOST_REQUIRE(wc.hasTrajectory());
+
+        GridReplayGeom g2(eg);
+        if (flattenMiddle) {
+            g2.flatten(1, 1, 1);   // 0-based middle completion cell (2,2,2)
+        }
+        const auto lgrNames =
+            wc.recomputeTrajectoryConnections(g2.corners, g2.cellInfo());
+
+        BOOST_CHECK(lgrNames.empty());     // nothing refined -> stays GLOBAL
+        BOOST_REQUIRE_EQUAL(wc.size(), 3u);
+
+        for (std::size_t c = 0; c < 3; ++c) {
+            BOOST_CHECK_EQUAL(wc[c].getI(), 1);
+            BOOST_CHECK_EQUAL(wc[c].getJ(), 1);
+            BOOST_CHECK_EQUAL(wc[c].getK(), static_cast<int>(c));   // K order preserved
+            BOOST_CHECK_EQUAL(wc[c].get_lgr_level(), 0);
+            BOOST_CHECK(wc[c].CF() > 0.0);
+        }
+        // A restored (fallback) completion keeps the ORIGINAL connection
+        // factor verbatim; a replay-recomputed one is close to it.
+        if (flattenMiddle) {
+            BOOST_CHECK_CLOSE(wc[1].CF(), cf0[1], 1.0e-9);
+        }
+    };
+
+    run(/*flattenMiddle=*/false);   // identity replay
+    run(/*flattenMiddle=*/true);    // middle cell grazed -> fallback restores it
 }
 
 BOOST_AUTO_TEST_CASE(Compdat_Zero_Perm_Dflt_Action)
