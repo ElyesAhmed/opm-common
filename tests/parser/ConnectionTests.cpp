@@ -52,6 +52,10 @@
 
 #include <opm/input/eclipse/Parser/Parser.hpp>
 
+#include <opm/input/eclipse/Schedule/WellTraj/RigEclipseWellLogExtractorGrid.hpp>
+#include <external/resinsight/ReservoirDataModel/RigWellPath.h>
+#include <external/resinsight/ReservoirDataModel/cvfGeometryTools.h>
+
 #include <array>
 #include <cstddef>
 #include <functional>
@@ -1495,4 +1499,159 @@ Problem with keyword COMPDAT
 In <memory string> line 44
 Connection (2,1,2) (direction 'Y') for well P ignored because
    PERMZ=0.000e+00 mD and PERMX=0.000e+00 mD.)");
+}
+
+// A synthetic centre vertex may coincide with an internal refined-cell face.
+// Replaying a straight completion must retain both children of every parent.
+BOOST_AUTO_TEST_CASE(RecomputeTrajectory_SyntheticRefinedKeepsAllChildren)
+{
+    const auto deck = Opm::Parser{}.parseString(STACKED_COMPLETION_DECK);
+    const auto es = Opm::EclipseState { deck };
+    auto sched = Opm::Schedule { deck, es, std::make_shared<Opm::Python>() };
+    const auto& coarse = es.getInputGrid();
+    GridReplayGeom original(coarse);
+    const Opm::EclipseGrid fine(6, 6, 6, 50.0, 50.0, 5.0, 2000.0);
+    GridReplayGeom refined(fine);
+    const auto lookup = refined.cellInfo();
+    auto wc = sched.getWell("P", 0).getConnections();
+    BOOST_REQUIRE(wc.synthesizeTrajectory(original.center(), original.extent()));
+    const auto names = wc.recomputeTrajectoryConnections(refined.corners,
+        [&lookup](std::size_t idx) {
+            auto cell = lookup(idx);
+            if (cell) { cell->lgr_grid = 1; cell->lgr_name = "FINE"; }
+            return cell;
+        });
+    BOOST_REQUIRE_EQUAL(names.size(), 1u);
+    BOOST_CHECK_EQUAL(*names.begin(), "FINE");
+    BOOST_REQUIRE_EQUAL(wc.size(), 6u);
+    for (int k = 0; k < 6; ++k) {
+        const auto& c = wc[k];
+        BOOST_CHECK_EQUAL(c.getI(), 3);
+        BOOST_CHECK_EQUAL(c.getJ(), 3);
+        BOOST_CHECK_EQUAL(c.getK(), k);
+        BOOST_CHECK_EQUAL(c.get_lgr_level(), 1);
+        BOOST_CHECK(c.CF() > 0.0);
+        BOOST_CHECK(c.Kh() > 0.0);
+    }
+}
+
+// Exact six-child geometry from SPE9 PRODU11. Roundoff in the shared face
+// corners puts the vertical path on a face-triangle edge: no child may vanish.
+BOOST_AUTO_TEST_CASE(RecomputeTrajectory_RefinedFaceDiagonal)
+{
+    const std::vector<std::array<external::cvf::Vec3d, 8>> corners {
+        {{
+            {1051.5600000000002, 868.68000000000006, 2926.652730267288},
+            {1097.2800000000002, 868.67999999999995, 2926.652730267288},
+            {1051.5600000000002, 914.40000000000009, 2926.652730267288},
+            {1097.2800000000002, 914.39999999999998, 2926.652730267288},
+            {1051.5600000000002, 868.68000000000006, 2928.9387302672881},
+            {1097.2800000000004, 868.68000000000018, 2928.9387302672881},
+            {1051.5600000000002, 914.40000000000009, 2928.9387302672881},
+            {1097.2800000000004, 914.4000000000002, 2928.9387302672881},
+        }},
+        {{
+            {1051.5600000000002, 868.68000000000006, 2928.9387302672881},
+            {1097.2800000000004, 868.68000000000018, 2928.9387302672881},
+            {1051.5600000000002, 914.40000000000009, 2928.9387302672881},
+            {1097.2800000000004, 914.4000000000002, 2928.9387302672881},
+            {1051.5600000000002, 868.68000000000018, 2931.2247302672881},
+            {1097.2800000000002, 868.68000000000006, 2931.2247302672881},
+            {1051.5600000000002, 914.40000000000009, 2931.2247302672881},
+            {1097.2800000000002, 914.40000000000009, 2931.2247302672881},
+        }},
+        {{
+            {1051.5600000000002, 868.68000000000018, 2931.2247302672881},
+            {1097.2800000000002, 868.68000000000006, 2931.2247302672881},
+            {1051.5600000000002, 914.40000000000009, 2931.2247302672881},
+            {1097.2800000000002, 914.40000000000009, 2931.2247302672881},
+            {1051.5600000000002, 868.68000000000018, 2935.187130267288},
+            {1097.2800000000002, 868.67999999999995, 2935.187130267288},
+            {1051.5600000000002, 914.40000000000009, 2935.187130267288},
+            {1097.2800000000002, 914.40000000000009, 2935.187130267288},
+        }},
+        {{
+            {1051.5600000000002, 868.68000000000018, 2935.187130267288},
+            {1097.2800000000002, 868.67999999999995, 2935.187130267288},
+            {1051.5600000000002, 914.40000000000009, 2935.187130267288},
+            {1097.2800000000002, 914.40000000000009, 2935.187130267288},
+            {1051.5600000000002, 868.68000000000006, 2939.1495302672879},
+            {1097.2800000000002, 868.67999999999995, 2939.1495302672879},
+            {1051.5600000000002, 914.4000000000002, 2939.1495302672879},
+            {1097.2800000000002, 914.40000000000009, 2939.1495302672879},
+        }},
+        {{
+            {1051.5600000000002, 868.68000000000006, 2939.1495302672879},
+            {1097.2800000000002, 868.67999999999995, 2939.1495302672879},
+            {1051.5600000000002, 914.4000000000002, 2939.1495302672879},
+            {1097.2800000000002, 914.40000000000009, 2939.1495302672879},
+            {1051.5600000000002, 868.68000000000006, 2941.435530267288},
+            {1097.2800000000002, 868.68000000000006, 2941.435530267288},
+            {1051.5600000000002, 914.40000000000009, 2941.435530267288},
+            {1097.2800000000002, 914.40000000000009, 2941.435530267288},
+        }},
+        {{
+            {1051.5600000000002, 868.68000000000006, 2941.435530267288},
+            {1097.2800000000002, 868.68000000000006, 2941.435530267288},
+            {1051.5600000000002, 914.40000000000009, 2941.435530267288},
+            {1097.2800000000002, 914.40000000000009, 2941.435530267288},
+            {1051.5600000000002, 868.68000000000006, 2943.721530267288},
+            {1097.2800000000004, 868.68000000000006, 2943.721530267288},
+            {1051.5600000000002, 914.40000000000009, 2943.721530267288},
+            {1097.2800000000004, 914.4000000000002, 2943.721530267288},
+        }},
+    };
+    const std::vector<external::cvf::Vec3d> points {
+        {1051.6514400000001, 868.7714400000001, 2926.6504442672881},
+        {1051.6514400000001, 868.7714400000001, 2928.9387302672881},
+        {1051.6514400000001, 868.7714400000001, 2935.187130267288},
+        {1051.6514400000001, 868.7714400000001, 2941.435530267288},
+        {1051.6514400000001, 868.7714400000001, 2943.7238162672879},
+    };
+    const std::vector<double> md { 0, 2.288285999999971, 8.5366859999999178, 14.785085999999865, 17.073371999999836 };
+    for (bool reverse : {false, true}) {
+        auto pathPoints = points;
+        auto pathMd = md;
+        if (reverse) {
+            std::reverse(pathPoints.begin(), pathPoints.end());
+            for (std::size_t i = 0; i < md.size(); ++i)
+                pathMd[i] = md.back() - md[md.size() - 1 - i];
+        }
+        external::cvf::ref<external::RigWellPath> path {new external::RigWellPath};
+        path->setWellPathPoints(pathPoints);
+        path->setMeasuredDepths(pathMd);
+        external::cvf::ref<external::cvf::BoundingBoxTree> tree;
+        external::RigEclipseWellLogExtractorGrid extractor(path.p(), corners, tree);
+        const auto hits = extractor.cellIntersectionInfosAlongWellPath();
+        BOOST_REQUIRE_EQUAL(hits.size(), 6u);
+        std::array<int, 6> count{};
+        double length = 0.0;
+        for (const auto& hit : hits) {
+            BOOST_REQUIRE_LT(hit.globCellIndex, count.size());
+            ++count[hit.globCellIndex];
+            BOOST_CHECK_GT(hit.endMD, hit.startMD);
+            length += hit.endMD - hit.startMD;
+        }
+        for (int n : count) BOOST_CHECK_EQUAL(n, 1);
+        BOOST_CHECK_SMALL(length - 17.0688, 1e-9);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(TrajectoryTriangle_BoundaryAndOutside)
+{
+    using external::cvf::Vec3d;
+    const Vec3d a(0, 0, 0), b(1, 0, 0), c(0, 1, 0);
+    for (bool reverse : {false, true}) {
+        const double start = reverse ? 1.0 : -1.0;
+        Vec3d intersection;
+        bool entering = false;
+        for (const auto& xy : {std::array<double, 2>{0.5, 0.5}, {0.0, 0.0}, {0.2, 0.2}})
+            BOOST_CHECK_EQUAL(external::cvf::GeometryTools::intersectLineSegmentTriangle(
+                Vec3d(xy[0], xy[1], start), Vec3d(xy[0], xy[1], -start),
+                a, b, c, &intersection, &entering), 1);
+        for (const auto& xy : {std::array<double, 2>{-1e-8, 0.5}, {0.5, 0.5 + 1e-8}})
+            BOOST_CHECK_EQUAL(external::cvf::GeometryTools::intersectLineSegmentTriangle(
+                Vec3d(xy[0], xy[1], start), Vec3d(xy[0], xy[1], -start),
+                a, b, c, &intersection, &entering), 0);
+    }
 }

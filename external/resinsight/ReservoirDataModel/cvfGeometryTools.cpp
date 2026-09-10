@@ -19,6 +19,8 @@
 
 #include "cvfGeometryTools.h"
 
+#include <limits>
+
 namespace external {
 namespace cvf
 {
@@ -574,14 +576,20 @@ int GeometryTools::intersectLineSegmentTriangle( const cvf::Vec3d& p0,
     wv = dot( w, v );
     D  = uv * uv - uu * vv;
 
+    // Adjacent face triangles must not both reject a crossing on their
+    // shared edge because its barycentric coordinate rounded just below zero
+    // (SPE9 refined PRODU11). This dimensionless roundoff allowance does not
+    // extend the line segment or replace the geometric sliver filter.
+    constexpr double barycentricTolerance = 64.0 * std::numeric_limits<double>::epsilon();
+
     // get and test parametric coords
     double s, t;
     s = ( uv * wv - vv * wu ) / D;
-    if ( s < 0.0 || s > 1.0 ) // I is outside T
+    if ( s < -barycentricTolerance || s > 1.0 + barycentricTolerance ) // I is outside T
         return 0;
 
     t = ( uv * wu - uu * wv ) / D;
-    if ( t < 0.0 || ( s + t ) > 1.0 ) // I is outside T
+    if ( t < -barycentricTolerance || ( s + t ) > 1.0 + barycentricTolerance ) // I is outside T
         return 0;
 
     return 1; // I is in T
