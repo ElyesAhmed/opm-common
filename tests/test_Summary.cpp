@@ -1722,8 +1722,8 @@ TSTEP
    1 /
 -- Report step 1: switch both wells to prediction mode.
 WCONPROD
---  WELL   STATUS CMODE ORAT RLFT RRFT RGFT BHP
-    'PROD' OPEN   ORAT  90.0 3*             140.0 /
+--  WELL   STATUS CMODE ORAT WRAT GRAT LRAT RESV BHP
+    'PROD' OPEN   ORAT  90.0 4*                  140.0 /
 /
 WCONINJE
 --  WELL  TYPE  STATUS CMODE RATE  1* BHP
